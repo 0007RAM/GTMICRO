@@ -511,18 +511,14 @@ class SpringBootSkeletonGenerator:
     # ------------------------------------------------------------------
     # FILE WRITERS
     # ------------------------------------------------------------------
-        @staticmethod
+
     def _write_file(self, path: str, content: str) -> None:
         try:
-
             directory = os.path.dirname(path)
-
             if directory:
                 os.makedirs(directory, exist_ok=True)
-
             with open(path, "w", encoding="utf-8") as file_handle:
                 file_handle.write(content)
-
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to write '{path}': {exc}"
