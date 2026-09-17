@@ -1,0 +1,51 @@
+use_case_id,use_case_name,description
+UC001,Customer Registration,Customer creates a new account using email and phone number
+UC002,Customer Login,Customer logs into the platform using credentials
+UC003,Password Reset,Customer resets forgotten account password
+UC004,Profile Management,Customer updates profile information and delivery addresses
+UC005,Restaurant Registration,Restaurant owner registers business on the platform
+UC006,Restaurant Verification,System verifies restaurant documents and approvals
+UC007,Menu Creation,Restaurant adds food items to its menu
+UC008,Menu Update,Restaurant updates pricing and availability of menu items
+UC009,Food Search,Customer searches for food items and restaurants
+UC010,Restaurant Search,Customer searches restaurants by location and cuisine
+UC011,View Restaurant Details,Customer views restaurant ratings and information
+UC012,View Menu,Customer browses available food items
+UC013,Add To Cart,Customer adds food items to shopping cart
+UC014,Update Cart,Customer modifies quantities of items in cart
+UC015,Remove From Cart,Customer removes items from cart
+UC016,Apply Coupon,Customer applies discount coupon to order
+UC017,Place Order,Customer confirms and submits order
+UC018,Order Confirmation,System confirms successful order placement
+UC019,Online Payment,Customer pays using UPI credit card or wallet
+UC020,Payment Verification,System verifies successful payment transaction
+UC021,Generate Invoice,System generates invoice for completed order
+UC022,Order Tracking,Customer tracks order status in real time
+UC023,Order Cancellation,Customer cancels order before preparation
+UC024,Refund Processing,System processes refund for cancelled orders
+UC025,Assign Delivery Partner,System assigns delivery agent to order
+UC026,Delivery Acceptance,Delivery partner accepts assigned delivery
+UC027,Pickup Order,Delivery partner picks up order from restaurant
+UC028,Delivery Navigation,System provides optimal delivery route
+UC029,Complete Delivery,Delivery partner marks order as delivered
+UC030,Delivery Status Update,System updates delivery progress
+UC031,Push Notifications,System sends order status notifications
+UC032,SMS Notifications,System sends SMS updates to customers
+UC033,Email Notifications,System sends email confirmations and receipts
+UC034,Customer Reviews,Customer submits ratings and reviews
+UC035,Restaurant Reviews,Customer rates restaurant experience
+UC036,Review Moderation,System moderates inappropriate reviews
+UC037,Loyalty Points,System awards reward points for purchases
+UC038,Redeem Rewards,Customer redeems accumulated reward points
+UC039,Customer Support Ticket,Customer creates support request
+UC040,Support Resolution,Support team resolves customer issues
+UC041,Restaurant Analytics,Restaurant views sales and order analytics
+UC042,Customer Analytics,System analyzes customer purchasing behavior
+UC043,Sales Reports,System generates business reports
+UC044,Inventory Tracking,Restaurant tracks ingredient availability
+UC045,Out Of Stock Management,System marks unavailable menu items
+UC046,Promotional Campaigns,Restaurant creates marketing promotions
+UC047,Featured Restaurants,System highlights promoted restaurants
+UC048,Fraud Detection,System detects suspicious payment activity
+UC049,Access Control,System manages user roles and permissions
+UC050,Audit Logging,System records important system activities
