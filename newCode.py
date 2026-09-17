@@ -1,6 +1,6 @@
 """
-GTMicro: Candidate Microservice Identification + LLM Naming + Dependency Discovery
-------------------------------------------------------------------------------------
+GTMicro: Candidate Microservice Identification + Dependency Discovery
+------------------------------------------------------------------------
 Pipeline:
 
     Requirements (CSV)
@@ -15,21 +15,15 @@ Pipeline:
     Hierarchical Clustering
         |
         v
-    Candidate Microservices  (clusters)
+    Candidate Microservices  (rule-based domain naming, no LLM)
         |
-        v
-    LLM Naming                 <-- ONLY naming is done by the LLM.
-        |                           Clustering itself stays algorithmic.
         v
     Dependency Discovery      (rule-based ontology, no LLM)
-        |
-        v
-    Dependency Graph (JSON + PNG)
 
-The LLM is used ONLY to generate a name for each already-formed cluster.
-It never creates, merges, splits, or moves use cases between clusters.
-Dependency discovery stays rule-based (keyword -> domain -> ontology),
-so it works the same regardless of what name the LLM picked.
+No LLM-based naming or dependency inference (no OpenAI/Gemini calls
+anywhere). No architecture diagrams beyond the required similarity
+heatmap / dendrogram / dependency graph. No Spring Boot / API
+generation. Pipeline stops after the dependency graph is produced.
 """
 
 from __future__ import annotations
@@ -48,8 +42,6 @@ matplotlib.use("Agg")  # safe for headless environments; also works with a displ
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from getpass import getpass
-
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.spatial.distance import squareform
@@ -61,14 +53,6 @@ except ImportError:
     sys.exit(
         "ERROR: sentence-transformers is not installed.\n"
         "Install with: pip install sentence-transformers --break-system-packages"
-    )
-
-try:
-    from openai import OpenAI
-except ImportError:
-    sys.exit(
-        "ERROR: openai package is not installed.\n"
-        "Install with: pip install openai --break-system-packages"
     )
 
 
@@ -87,7 +71,6 @@ CSV_FILE: str = "requirements.csv"
 USE_CASE_COLUMN: str = "use_case_name"
 DEPENDENCIES_JSON_PATH: str = "dependencies.json"
 DEPENDENCY_GRAPH_IMAGE_PATH: str = "dependency_graph.png"
-MICROSERVICES_JSON_PATH: str = "microservices_output.json"
 
 # Fallback cluster count, used only if silhouette analysis can't run
 # (e.g. too few use cases to evaluate more than one candidate k).
@@ -95,9 +78,6 @@ DEFAULT_NUMBER_OF_CLUSTERS: int = 3
 
 # Upper bound on k tried during silhouette analysis.
 MAX_CLUSTERS_TO_TRY: int = 10
-
-# LLM model used ONLY for naming clusters (no other pipeline step calls it).
-LLM_MODEL: str = "gpt-5.6-luna"
 
 # Sample data written automatically if CSV_FILE does not exist, so the
 # script is runnable end-to-end without any manual setup. Mirrors the
@@ -115,29 +95,6 @@ SAMPLE_USE_CASES: List[str] = [
     "Payment Processing",
     "Refund Processing",
 ]
-
-
-# =====================================================================
-# OPENAI API KEY
-# =====================================================================
-
-def get_openai_client() -> OpenAI:
-    """
-    Look for OPENAI_API_KEY in the environment first; if not found, prompt
-    the user securely (input is not echoed to the terminal).
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        print("\nOpenAI API key not found in environment.")
-        print("Enter your API key below.")
-        print("Your key will not be printed on the screen.\n")
-        api_key = getpass("Enter OpenAI API key: ")
-
-    if not api_key:
-        sys.exit("ERROR: An OpenAI API key is required for LLM-based naming.")
-
-    return OpenAI(api_key=api_key)
 
 
 # =====================================================================
@@ -186,9 +143,6 @@ def load_use_cases_from_csv(csv_file: str, column_name: str) -> List[str]:
 
         use_cases = df[column_name].dropna().astype(str).str.strip().tolist()
         use_cases = [uc for uc in use_cases if uc]  # drop empty strings
-
-        # Remove duplicates while preserving order.
-        use_cases = list(dict.fromkeys(use_cases))
 
         if not use_cases:
             raise ValueError(f"No non-empty use cases found in column '{column_name}'.")
@@ -283,6 +237,9 @@ def perform_clustering(
 
     Returns:
         (linkage_matrix, square_distance_matrix)
+        The square distance matrix is returned too so silhouette analysis
+        can reuse the *same* cosine-distance metric the clustering was
+        actually performed on, instead of silently switching metrics.
     """
     try:
         distance_matrix = 1.0 - sim_df.values
@@ -343,7 +300,13 @@ def find_optimal_clusters(
     """
     Find the optimal number of clusters using the Silhouette Score,
     evaluated on the SAME cosine distance matrix the clustering used
-    (metric='precomputed').
+    (metric='precomputed'), so the score is consistent with how the
+    tree was actually built.
+
+    Silhouette Score is only defined for 2 <= n_clusters <= n_samples - 1,
+    so the search range is bounded accordingly. If there are too few use
+    cases to evaluate more than one candidate k, this falls back to
+    DEFAULT_NUMBER_OF_CLUSTERS.
     """
     upper_bound = min(max_clusters, n_use_cases - 1)
 
@@ -364,6 +327,8 @@ def find_optimal_clusters(
     for k in range(2, upper_bound + 1):
         labels = fcluster(linkage_matrix, t=k, criterion="maxclust")
 
+        # fcluster can occasionally collapse to fewer than k distinct labels;
+        # silhouette_score requires at least 2 distinct labels to be valid.
         if len(set(labels)) < 2:
             print(f"Clusters = {k} | skipped (produced < 2 distinct groups)")
             continue
@@ -428,140 +393,23 @@ def extract_microservices(
         microservices[cluster_id] = members
 
     print("\n------------------------------------")
-    print("CANDIDATE MICROSERVICE CLUSTERS (pre-naming)")
+    print("CANDIDATE MICROSERVICE CLUSTERS")
     print("------------------------------------")
     for cluster_id, members in microservices.items():
-        print(f"\nCluster {cluster_id}")
+        print(f"\nMicroservice {cluster_id}")
         for use_case in members:
-            print(f"  - {use_case}")
+            print(f"- {use_case}")
 
     return microservices
 
 
 # =====================================================================
-# STEP 7: LLM-BASED MICROSERVICE NAMING
+# RULE-BASED DOMAIN CLASSIFICATION (shared by naming + dependency rules)
 # =====================================================================
-# The LLM is used ONLY to name an already-formed cluster. It does NOT:
-#   - create clusters
-#   - merge clusters
-#   - split clusters
-#   - move use cases between clusters
 
-def generate_microservice_name(llm_client: OpenAI, use_cases_in_cluster: List[str]) -> str:
-    """Ask the LLM for one concise microservice name for a given cluster."""
-
-    use_case_text = "\n".join(f"- {uc}" for uc in use_cases_in_cluster)
-
-    prompt = f"""
-You are naming a microservice identified by a clustering algorithm.
-
-The following use cases already belong to ONE cluster:
-
-{use_case_text}
-
-Give one concise and meaningful microservice name.
-
-Rules:
-1. Return ONLY the microservice name.
-2. Do not explain.
-3. Do not create multiple names.
-4. Do not move or remove use cases.
-5. Do not merge or split the cluster.
-6. Use a software architecture naming style.
-7. Prefer names such as:
-   Account Service
-   Catalog Service
-   Order Service
-   Payment Service
-   Shopping Cart Service
-   Authentication Service
-
-Return only the name.
-"""
-
-    try:
-        response = llm_client.responses.create(model=LLM_MODEL, input=prompt)
-        name = response.output_text.strip()
-        name = name.strip('"').strip("'")
-
-        if not name:
-            name = "Microservice"
-
-        return name
-
-    except Exception as exc:
-        print(f"\nWarning: LLM naming failed: {exc}")
-        return "Microservice"
-
-
-def name_microservices_with_llm(
-    llm_client: OpenAI, microservices: Dict[int, List[str]]
-) -> Dict[str, List[str]]:
-    """
-    Convert numeric cluster ids into LLM-generated service names.
-    Duplicate names are disambiguated with a numeric suffix so the
-    resulting dict keys stay unique.
-    """
-    named: Dict[str, List[str]] = {}
-    name_counts: Dict[str, int] = {}
-
-    for cluster_id, use_cases in microservices.items():
-        print(f"\nNaming Cluster {cluster_id}...")
-        base_name = generate_microservice_name(llm_client, use_cases)
-        print(f"Generated name: {base_name}")
-
-        if base_name in name_counts:
-            name_counts[base_name] += 1
-            final_name = f"{base_name} ({name_counts[base_name]})"
-        else:
-            name_counts[base_name] = 1
-            final_name = base_name
-
-        named[final_name] = use_cases
-
-    print("\n------------------------------------")
-    print("NAMED MICROSERVICES")
-    print("------------------------------------")
-    for service_name, use_cases in named.items():
-        print(f"\n{service_name}")
-        for use_case in use_cases:
-            print(f"  - {use_case}")
-
-    return named
-
-
-def save_named_microservices(
-    named_microservices: Dict[str, List[str]], path: str = MICROSERVICES_JSON_PATH
-) -> None:
-    """
-    Persist the named clusters to a JSON file in the GTMicro output format.
-    Not printed to the console — the human-readable listing is handled by
-    name_microservices_with_llm() above.
-    """
-    output = {
-        "microservices": [
-            {"microservice_name": name, "use_cases": use_cases}
-            for name, use_cases in named_microservices.items()
-        ]
-    }
-
-    try:
-        with open(path, "w", encoding="utf-8") as file_handle:
-            json.dump(output, file_handle, indent=2, ensure_ascii=False)
-        print(f"\nMicroservices JSON saved to: {path}")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to write microservices JSON to '{path}': {exc}") from exc
-
-
-# =====================================================================
-# RULE-BASED DOMAIN CLASSIFICATION (used ONLY for dependency discovery)
-# =====================================================================
-# Naming is done by the LLM (above). This classifier is kept purely to
-# figure out each service's business domain (auth/catalog/order/...)
-# from its use cases, so the dependency ontology below can be applied.
-# It reads the (unchanged) use case text, so it works the same
-# regardless of what name the LLM picked for the cluster.
-
+# Keyword vocabulary per business domain. Extend/override via the
+# `domain_keywords` constructor argument of DomainClassifier for other
+# problem domains; no LLM is used anywhere in this classification.
 DEFAULT_DOMAIN_KEYWORDS: Dict[str, Set[str]] = {
     "auth": {
         "login", "logout", "register", "registration", "signup", "signin",
@@ -591,7 +439,11 @@ DEFAULT_DOMAIN_KEYWORDS: Dict[str, Set[str]] = {
     },
 }
 
-# Domain-level dependency ontology: domain -> set of domains it depends on.
+# Domain-level dependency ontology: domain -> set of domains it depends
+# on. This encodes business knowledge such as "placing/tracking an order
+# requires the catalog (for product/menu data) and payment (to charge
+# the customer)". Extend/override via the `dependency_rules` constructor
+# argument of DependencyDiscovery.
 DEFAULT_DEPENDENCY_RULES: Dict[str, Set[str]] = {
     "auth": set(),
     "catalog": set(),
@@ -601,74 +453,20 @@ DEFAULT_DEPENDENCY_RULES: Dict[str, Set[str]] = {
     "notification": {"order"},
     "review": {"catalog", "order"},
 }
-def save_services_json(
-    named_microservices: dict,
-    output_file: str = "services.json",
-) -> None:
-    """
-    Persist the named microservices dictionary to a JSON file.
 
-    Validates the input before writing:
-      - the dictionary is not empty
-      - every key (service name) is a non-empty string
-      - every value (use cases) is a list
-      - duplicate use cases within a service are removed (order preserved)
-
-    Args:
-        named_microservices: service_name -> list of use case names,
-            as already produced by the existing naming step.
-        output_file: destination path for the JSON file. Defaults to
-            "services.json" and safely overwrites any existing file there.
-
-    Raises:
-        ValueError: if the input dictionary is empty or malformed.
-        RuntimeError: if the file cannot be written.
-    """
-    if not named_microservices:
-        raise ValueError("named_microservices is empty; nothing to save.")
-
-    validated: Dict[str, List[str]] = {}
-
-    for service_name, use_cases in named_microservices.items():
-        if not isinstance(service_name, str) or not service_name.strip():
-            raise ValueError(
-                f"Invalid service name: {service_name!r} (must be a non-empty string)."
-            )
-
-        if not isinstance(use_cases, list):
-            raise ValueError(
-                f"Use cases for '{service_name}' must be a list, "
-                f"got {type(use_cases).__name__}."
-            )
-
-        # Remove duplicate use cases while preserving original order.
-        deduped_use_cases = list(dict.fromkeys(use_cases))
-        validated[service_name] = deduped_use_cases
-
-    try:
-        with open(output_file, "w", encoding="utf-8") as file_handle:
-            json.dump(validated, file_handle, indent=4, ensure_ascii=False)
-    except OSError as exc:
-        raise RuntimeError(
-            f"Failed to write services JSON to '{output_file}': {exc}"
-        ) from exc
-
-    print(f"\nServices JSON saved successfully:\n{output_file}")
-    print(f"\nTotal Services: {len(validated)}")
 
 class DomainClassifier:
     """
     Deterministic, rule-based classifier that maps a service's name and
-    use cases to a business domain using keyword overlap. No ML model or
-    external API call is used; classification is fully explainable and
-    reproducible. Used only to drive dependency discovery, not naming.
+    use cases to a business domain (e.g. 'auth', 'catalog', 'order',
+    'payment') using keyword overlap. No ML model or external API call
+    is used; classification is fully explainable and reproducible.
     """
 
     DEFAULT_STOPWORDS: Set[str] = {
         "a", "an", "the", "and", "or", "for", "of", "to", "in", "on",
         "with", "by", "via", "using", "new", "user", "users", "customer",
         "allow", "allows", "enable", "system", "feature", "functionality",
-        "service",
     }
 
     def __init__(
@@ -676,6 +474,13 @@ class DomainClassifier:
         domain_keywords: Optional[Dict[str, Set[str]]] = None,
         stopwords: Optional[Set[str]] = None,
     ) -> None:
+        """
+        Args:
+            domain_keywords: mapping of domain name -> keyword set.
+                Defaults to DEFAULT_DOMAIN_KEYWORDS.
+            stopwords: words ignored during tokenization.
+                Defaults to DEFAULT_STOPWORDS.
+        """
         self.domain_keywords: Dict[str, Set[str]] = (
             domain_keywords if domain_keywords is not None else DEFAULT_DOMAIN_KEYWORDS
         )
@@ -695,6 +500,10 @@ class DomainClassifier:
         """
         Classify a list of texts (e.g. a service name plus its use cases)
         into the single best-matching domain based on keyword overlap.
+
+        Returns:
+            The domain name with the highest keyword overlap score, or
+            None if no configured domain keyword appears in the text.
         """
         if not texts:
             return None
@@ -716,8 +525,43 @@ class DomainClassifier:
         if not scores:
             return None
 
+        # Highest overlap wins; ties broken alphabetically for determinism.
         best_domain = max(scores.items(), key=lambda kv: (kv[1], kv[0]))[0]
         return best_domain
+
+
+def name_microservices(
+    microservices: Dict[int, List[str]], classifier: DomainClassifier
+) -> Dict[str, List[str]]:
+    """
+    Convert numeric cluster ids into human-readable service names using
+    rule-based domain classification (no LLM). Clusters that don't match
+    any known domain fall back to a generic 'Microservice {id}' name.
+
+    Args:
+        microservices: cluster_id -> list of use case names.
+        classifier: a DomainClassifier instance.
+
+    Returns:
+        service_name -> list of use case names.
+    """
+    named: Dict[str, List[str]] = {}
+    name_counts: Dict[str, int] = {}
+
+    for cluster_id, use_cases in microservices.items():
+        domain = classifier.classify(use_cases)
+        base_name = f"{domain.title()} Service" if domain else f"Microservice {cluster_id}"
+
+        if base_name in name_counts:
+            name_counts[base_name] += 1
+            final_name = f"{base_name} ({name_counts[base_name]})"
+        else:
+            name_counts[base_name] = 1
+            final_name = base_name
+
+        named[final_name] = use_cases
+
+    return named
 
 
 # =====================================================================
@@ -727,9 +571,13 @@ class DomainClassifier:
 class DependencyDiscovery:
     """
     Discovers directed dependency relationships between candidate
-    microservices using a rule-based domain ontology. No LLM is used
-    here; all inference comes from keyword-based domain classification
-    plus a configurable domain dependency ontology.
+    microservices using a rule-based domain ontology.
+
+    An edge A -> B means "service A depends on service B" (e.g. an Order
+    Service depends on a Payment Service because placing an order
+    requires charging the customer). No LLM or external API is used;
+    all inference comes from keyword-based domain classification plus a
+    configurable domain dependency ontology (DEFAULT_DEPENDENCY_RULES).
     """
 
     def __init__(
@@ -737,6 +585,13 @@ class DependencyDiscovery:
         classifier: Optional[DomainClassifier] = None,
         dependency_rules: Optional[Dict[str, Set[str]]] = None,
     ) -> None:
+        """
+        Args:
+            classifier: a DomainClassifier used to map each service to a
+                business domain. Defaults to a fresh DomainClassifier().
+            dependency_rules: domain -> set of domains it depends on.
+                Defaults to DEFAULT_DEPENDENCY_RULES.
+        """
         self.classifier: DomainClassifier = classifier or DomainClassifier()
         self.dependency_rules: Dict[str, Set[str]] = (
             dependency_rules if dependency_rules is not None else DEFAULT_DEPENDENCY_RULES
@@ -773,18 +628,19 @@ class DependencyDiscovery:
             for required_domain in required_domains:
                 for target_service in domain_to_services.get(required_domain, []):
                     if target_service == service:
-                        continue  # ignore self-dependencies
+                        continue  # requirement 8: ignore self-dependencies
                     if target_service not in graph[service]:
-                        graph[service].append(target_service)  # dedup
+                        graph[service].append(target_service)  # requirement 7: dedup
 
         return graph
 
     @staticmethod
     def _remove_cycles(graph: Dict[str, List[str]]) -> Dict[str, List[str]]:
         """
-        Detect and break circular dependencies using DFS with a
-        white/gray/black coloring scheme. Any edge that would close a
-        cycle is dropped and reported; the rest of the graph is kept.
+        Detect and break circular dependencies (requirement 6) using DFS
+        with a white/gray/black coloring scheme. Any edge that would close
+        a cycle (pointing back to a node currently on the recursion stack)
+        is dropped and reported; the rest of the graph is left intact.
         """
         WHITE, GRAY, BLACK = 0, 1, 2
         color: Dict[str, int] = {node: WHITE for node in graph}
@@ -796,7 +652,7 @@ class DependencyDiscovery:
             color[node] = GRAY
             for neighbor in list(cleaned_graph[node]):
                 if neighbor not in color:
-                    continue
+                    continue  # defensive: neighbor outside known node set
                 if color[neighbor] == GRAY:
                     print(
                         f"WARNING: circular dependency detected "
@@ -815,7 +671,13 @@ class DependencyDiscovery:
         return cleaned_graph
 
     def discover(self, service_use_cases: Dict[str, List[str]]) -> Dict[str, List[str]]:
-        """Run full dependency discovery on a service_name -> use_cases map."""
+        """
+        Run full dependency discovery on a service_name -> use_cases map.
+
+        Returns:
+            service_name -> list of service names it depends on (acyclic,
+            deduplicated, self-dependency free).
+        """
         if not service_use_cases:
             raise ValueError("service_use_cases is empty; nothing to analyze.")
 
@@ -830,7 +692,7 @@ class DependencyDiscovery:
 
     @staticmethod
     def print_report(graph: Dict[str, List[str]]) -> None:
-        """Print the dependency graph in a human-readable format."""
+        """Print the dependency graph in the required human-readable format."""
         print("\n====================================")
         print("DEPENDENCY DISCOVERY RESULTS")
         print("====================================")
@@ -844,7 +706,7 @@ class DependencyDiscovery:
 
     @staticmethod
     def to_json(graph: Dict[str, List[str]], path: str = DEPENDENCIES_JSON_PATH) -> None:
-        """Export the dependency graph as JSON."""
+        """Export the dependency graph as JSON (requirement 9 & 11)."""
         try:
             with open(path, "w", encoding="utf-8") as file_handle:
                 json.dump(graph, file_handle, indent=4)
@@ -858,7 +720,10 @@ class DependencyDiscovery:
     def visualize(
         graph: Dict[str, List[str]], path: str = DEPENDENCY_GRAPH_IMAGE_PATH
     ) -> None:
-        """Render the dependency graph as a directed graph image."""
+        """
+        Render the dependency graph as a directed graph image using
+        NetworkX + Matplotlib (requirement 12 & 13).
+        """
         try:
             import networkx as nx
         except ImportError as exc:
@@ -899,7 +764,54 @@ class DependencyDiscovery:
             print(f"Dependency graph visualization saved to: {path}")
         except Exception as exc:
             raise RuntimeError(f"Dependency graph visualization failed: {exc}") from exc
+import json
 
+
+def save_services_json(
+    named_microservices: dict,
+    output_file: str = "services.json"
+) -> None:
+    """
+    Save named microservices to services.json.
+    """
+
+    if not named_microservices:
+        raise ValueError("No named microservices found.")
+
+    cleaned_services = {}
+
+    for service_name, use_cases in named_microservices.items():
+
+        if not isinstance(service_name, str):
+            continue
+
+        if not isinstance(use_cases, list):
+            continue
+
+        # Remove duplicates while preserving order
+        unique_use_cases = list(dict.fromkeys(use_cases))
+
+        cleaned_services[service_name] = unique_use_cases
+
+    try:
+        with open(output_file, "w", encoding="utf-8") as file:
+            json.dump(
+                cleaned_services,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        print("\n------------------------------------")
+        print("SERVICES JSON GENERATED")
+        print("------------------------------------")
+        print(f"File Saved : {output_file}")
+        print(f"Services   : {len(cleaned_services)}")
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to save {output_file}: {exc}"
+        ) from exc
 
 # =====================================================================
 # MAIN EXECUTION BLOCK
@@ -907,9 +819,6 @@ class DependencyDiscovery:
 
 def main() -> None:
     try:
-        # --- OpenAI client (used only for naming) ---
-        llm_client = get_openai_client()
-
         # --- Candidate microservice identification (GTMicro core) ---
         model = load_model(MODEL_NAME)
 
@@ -932,12 +841,20 @@ def main() -> None:
             linkage_matrix, use_cases, optimal_clusters
         )
 
-        # --- LLM-based naming (clusters are already fixed; LLM only names them) ---
-        named_microservices = name_microservices_with_llm(llm_client, microservices_by_id)
-        save_named_microservices(named_microservices, MICROSERVICES_JSON_PATH)
-
-        # --- Dependency Discovery (rule-based, unaffected by LLM naming) ---
+        # --- Rule-based naming (bridges clustering -> dependency discovery) ---
         classifier = DomainClassifier()
+        named_microservices = name_microservices(microservices_by_id, classifier)
+        save_services_json(named_microservices)
+
+        print("\n------------------------------------")
+        print("NAMED CANDIDATE MICROSERVICES")
+        print("------------------------------------")
+        for service_name, members in named_microservices.items():
+            print(f"\n{service_name}")
+            for use_case in members:
+                print(f"- {use_case}")
+
+        # --- Dependency Discovery (new phase) ---
         dependency_discovery = DependencyDiscovery(classifier=classifier)
         dependency_graph = dependency_discovery.discover(named_microservices)
 
